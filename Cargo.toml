@@ -1,0 +1,44 @@
+[workspace]
+members = ["crates/*"]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+version = "0.1.0"
+license = "CAL-1.0"
+homepage = "https://github.com/rainlanguage/rain.forker"
+repository = "https://github.com/rainlanguage/rain.forker"
+
+[workspace.dependencies]
+# All on crates.io (unlike foundry-evm), which is the whole point: it lets this
+# crate — and its consumers — publish. This is the newest mutually-consistent set
+# that stays on alloy 1.x: revm 36 ↔ revm-inspectors 0.36 (alloy-rpc-types-trace
+# ^1.0.38) ↔ foundry-fork-db 0.24 (revm ^36). Going newer (fork-db 0.26 / revm 38
+# / inspectors 0.39) forces alloy 2.x, which would clash with the rest of the Rain
+# ecosystem (raindex, rainlang, rain-math-float are all alloy 1.x) at this crate's
+# API boundary.
+revm = { version = "36", default-features = false, features = [
+  "std",
+  "serde",
+  "memory_limit",
+  "optional_eip3607",
+  "optional_block_gas_limit",
+  "optional_no_base_fee",
+  "arbitrary",
+] }
+revm-inspectors = "0.36"
+foundry-fork-db = "0.24"
+alloy = { version = "1", features = [
+  "sol-types",
+  "json-rpc",
+  "rpc-types",
+  "providers",
+  "provider-http",
+  "network",
+  "consensus",
+  "json",
+] }
+rain-error-decoding = "0.1.2"
+thiserror = "1.0.56"
+eyre = "0.6"
+serde = { version = "1.0", features = ["derive"] }

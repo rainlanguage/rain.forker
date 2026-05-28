@@ -1,0 +1,5 @@
+name: rainix-rs-test
+on: [push]
+jobs:
+  rs-test:
+    uses: rainlanguage/rainix/.github/workflows/rainix-rs-test.yaml@main

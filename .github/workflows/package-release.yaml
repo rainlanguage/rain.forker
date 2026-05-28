@@ -1,0 +1,13 @@
+name: Package Release
+on:
+  push:
+    branches:
+      - main
+jobs:
+  release:
+    # Content-gated cargo publish (rainix#191): bumps + publishes rain-forker when
+    # its packaged contents change. No npm package — this is a Rust-only library.
+    uses: rainlanguage/rainix/.github/workflows/rainix-autopublish.yaml@main
+    with:
+      crate: rain-forker
+    secrets: inherit
