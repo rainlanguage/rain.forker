@@ -353,6 +353,13 @@ async fn test_many_parallel_reads() {
 const STOP_ADDR: Address = address!("00000000000000000000000000000000000000dd");
 
 #[test]
+fn test_forker_is_clone_send_sync() {
+    fn assert_clone_send_sync<T: Clone + Send + Sync>() {}
+    // Downstream consumers clone the Forker and share it across threads (Arc).
+    assert_clone_send_sync::<Forker>();
+}
+
+#[test]
 fn test_forkid_new() {
     let a = rain_forker::ForkId::new("https://example.com", Some(7));
     let b = rain_forker::ForkId::new("https://example.com", Some(7));
