@@ -7,9 +7,45 @@
 use alloy::node_bindings::Anvil;
 use alloy::primitives::{address, bytes, Address, U256};
 use alloy::providers::{Provider, ProviderBuilder};
+use alloy::rpc::types::TransactionRequest;
+use alloy::sol;
 use rain_forker::{ForkCallError, Forker, NewForkedEvm};
 
 const ZERO: [u8; 20] = [0u8; 20];
+
+sol! {
+    interface Demo {
+        function get() external returns (uint256);
+    }
+}
+
+/// Runtime that returns the constant 42 for any call.
+fn const42_runtime() -> alloy::primitives::Bytes {
+    bytes!("602a60005260206000f3")
+}
+
+/// Runtime that always reverts with empty data.
+fn revert_runtime() -> alloy::primitives::Bytes {
+    bytes!("60006000fd")
+}
+
+const CONST_ADDR: Address = address!("00000000000000000000000000000000000000bb");
+const REVERT_ADDR: Address = address!("00000000000000000000000000000000000000cc");
+
+/// Spawns anvil, injects `code` at `addr`, and returns the endpoint URL.
+async fn anvil_with_code(
+    addr: Address,
+    code: alloy::primitives::Bytes,
+) -> (alloy::node_bindings::AnvilInstance, String) {
+    let anvil = Anvil::new().spawn();
+    let provider = ProviderBuilder::new().connect_http(anvil.endpoint().parse().unwrap());
+    provider
+        .raw_request::<_, ()>("anvil_setCode".into(), (addr, code))
+        .await
+        .unwrap();
+    let url = anvil.endpoint();
+    (anvil, url)
+}
 
 /// Address of the EVM identity precompile (0x..04), which returns its input.
 fn identity_precompile() -> [u8; 20] {
@@ -157,4 +193,115 @@ async fn test_commit_persists_and_reads_are_isolated() {
     let traces = r3.traces.expect("traces present");
     let node = &traces.nodes()[0];
     assert_eq!(Address::from(node.trace.address.into_array()), COUNTER_ADDR);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn test_alloy_call_typed() {
+    let (_anvil, url) = anvil_with_code(CONST_ADDR, const42_runtime()).await;
+    let forker = Forker::new_with_fork(
+        NewForkedEvm {
+            fork_url: url,
+            fork_block_number: None,
+        },
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+
+    // The contract returns 42 for any call; the typed return decodes to uint256.
+    let res = match forker
+        .alloy_call(Address::ZERO, CONST_ADDR, Demo::getCall {}, false)
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => panic!("alloy_call failed: {e:?}"),
+    };
+    assert!(res.raw.exit_reason.is_ok());
+    assert_eq!(res.typed_return, U256::from(42));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn test_alloy_call_revert_surfaces_failed() {
+    let (_anvil, url) = anvil_with_code(REVERT_ADDR, revert_runtime()).await;
+    let forker = Forker::new_with_fork(
+        NewForkedEvm {
+            fork_url: url,
+            fork_block_number: None,
+        },
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+
+    // A reverting call with decoding off surfaces as `Failed` carrying the raw result.
+    let res = forker
+        .alloy_call(Address::ZERO, REVERT_ADDR, Demo::getCall {}, false)
+        .await;
+    assert!(matches!(res, Err(ForkCallError::Failed(_))));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn test_add_or_select_then_call_and_roll() {
+    let anvil = Anvil::new().spawn();
+    let mut forker = Forker::new().unwrap();
+
+    // add_or_select populates an empty forker.
+    forker
+        .add_or_select(
+            NewForkedEvm {
+                fork_url: anvil.endpoint(),
+                fork_block_number: None,
+            },
+            None,
+        )
+        .await
+        .unwrap();
+
+    let input = [9u8; 16];
+    let res = forker.call(&ZERO, &identity_precompile(), &input).unwrap();
+    assert_eq!(res.result.as_ref(), &input);
+
+    // roll_fork on an active fork succeeds.
+    forker.roll_fork(Some(0), None).unwrap();
+    let res = forker.call(&ZERO, &identity_precompile(), &input).unwrap();
+    assert_eq!(res.result.as_ref(), &input);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn test_replay_transaction() {
+    let anvil = Anvil::new().spawn();
+    let provider = ProviderBuilder::new().connect_http(anvil.endpoint().parse().unwrap());
+    provider
+        .raw_request::<_, ()>("anvil_setCode".into(), (COUNTER_ADDR, counter_runtime()))
+        .await
+        .unwrap();
+
+    // Send a transaction to the counter (increments 0 -> 1), mined by anvil.
+    let from = anvil.addresses()[0];
+    let tx = TransactionRequest::default().from(from).to(COUNTER_ADDR);
+    let receipt = provider
+        .send_transaction(tx)
+        .await
+        .unwrap()
+        .get_receipt()
+        .await
+        .unwrap();
+    let tx_hash = receipt.transaction_hash;
+
+    let mut forker = Forker::new_with_fork(
+        NewForkedEvm {
+            fork_url: anvil.endpoint(),
+            fork_block_number: None,
+        },
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+
+    // Replaying re-executes the tx in its block context: counter was 0, becomes 1.
+    let res = forker.replay_transaction(tx_hash).await.unwrap();
+    assert_eq!(U256::from_be_slice(&res.result), U256::from(1));
 }
