@@ -305,3 +305,128 @@ async fn test_replay_transaction() {
     let res = forker.replay_transaction(tx_hash).await.unwrap();
     assert_eq!(U256::from_be_slice(&res.result), U256::from(1));
 }
+
+/// Runtime that halts immediately (STOP), returning empty data on success.
+fn stop_runtime() -> alloy::primitives::Bytes {
+    bytes!("00")
+}
+
+const STOP_ADDR: Address = address!("00000000000000000000000000000000000000dd");
+
+#[test]
+fn test_forkid_new() {
+    let a = rain_forker::ForkId::new("https://example.com", Some(7));
+    let b = rain_forker::ForkId::new("https://example.com", Some(7));
+    let c = rain_forker::ForkId::new("https://example.com", None);
+    assert_eq!(a, b);
+    assert_ne!(a, c);
+}
+
+#[test]
+fn test_default_forker_has_no_active_fork() {
+    let forker = Forker::default();
+    let result = forker.call(&ZERO, &identity_precompile(), &[]);
+    assert!(
+        matches!(result, Err(ForkCallError::ExecutorError(ref msg)) if msg == "no active fork!")
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn test_alloy_call_committing_typed() {
+    let (_anvil, url) = anvil_with_code(COUNTER_ADDR, counter_runtime()).await;
+    let mut forker = Forker::new_with_fork(
+        NewForkedEvm {
+            fork_url: url,
+            fork_block_number: None,
+        },
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+
+    // The counter ignores calldata, so a typed committing call increments and
+    // returns the new value, persisting across calls.
+    let first = match forker
+        .alloy_call_committing(
+            Address::ZERO,
+            COUNTER_ADDR,
+            Demo::getCall {},
+            U256::ZERO,
+            false,
+        )
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => panic!("alloy_call_committing failed: {e:?}"),
+    };
+    assert_eq!(first.typed_return, U256::from(1));
+
+    let second = forker
+        .alloy_call_committing(
+            Address::ZERO,
+            COUNTER_ADDR,
+            Demo::getCall {},
+            U256::ZERO,
+            false,
+        )
+        .await
+        .unwrap_or_else(|e| panic!("{e:?}"));
+    assert_eq!(second.typed_return, U256::from(2));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn test_typed_error_on_undecodable_return() {
+    let (_anvil, url) = anvil_with_code(STOP_ADDR, stop_runtime()).await;
+    let forker = Forker::new_with_fork(
+        NewForkedEvm {
+            fork_url: url,
+            fork_block_number: None,
+        },
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+
+    // The call succeeds with empty output, which cannot decode to uint256.
+    let res = forker
+        .alloy_call(Address::ZERO, STOP_ADDR, Demo::getCall {}, false)
+        .await;
+    assert!(matches!(res, Err(ForkCallError::TypedError(_))));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn test_pinned_fork_reads_historical_state() {
+    let anvil = Anvil::new().spawn();
+    let provider = ProviderBuilder::new().connect_http(anvil.endpoint().parse().unwrap());
+    provider
+        .raw_request::<_, ()>("anvil_setCode".into(), (COUNTER_ADDR, counter_runtime()))
+        .await
+        .unwrap();
+
+    // A tx in block 1 increments the counter 0 -> 1.
+    let from = anvil.addresses()[0];
+    let receipt = provider
+        .send_transaction(TransactionRequest::default().from(from).to(COUNTER_ADDR))
+        .await
+        .unwrap()
+        .get_receipt()
+        .await
+        .unwrap();
+    let block1 = receipt.block_number.unwrap();
+
+    // Forking pinned at block 1 sees the stored value 1, so a read computes 1 + 1.
+    let forker = Forker::new_with_fork(
+        NewForkedEvm {
+            fork_url: anvil.endpoint(),
+            fork_block_number: Some(block1),
+        },
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let res = forker.call(&ZERO, COUNTER_ADDR.as_slice(), &[]).unwrap();
+    assert_eq!(U256::from_be_slice(&res.result), U256::from(2));
+}
