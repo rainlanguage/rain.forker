@@ -311,6 +311,45 @@ fn stop_runtime() -> alloy::primitives::Bytes {
     bytes!("00")
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 10)]
+async fn test_many_parallel_reads() {
+    let (_anvil, url) = anvil_with_code(COUNTER_ADDR, counter_runtime()).await;
+    let forker = std::sync::Arc::new(
+        Forker::new_with_fork(
+            NewForkedEvm {
+                fork_url: url,
+                fork_block_number: None,
+            },
+            None,
+            None,
+        )
+        .await
+        .unwrap(),
+    );
+
+    // Many concurrent reads against a shared Forker, each hitting the shared
+    // backend for the contract's code/storage. Guards against deadlock under
+    // load when the backend is called from spawned tasks.
+    let mut handles = vec![];
+    for _ in 0..1000 {
+        let f = std::sync::Arc::clone(&forker);
+        handles.push(tokio::spawn(async move {
+            // Multiple sequential reads per task, mirroring fork_eval's pattern of
+            // several awaited calls in a row.
+            let mut last = U256::ZERO;
+            for _ in 0..5 {
+                let res = f.call(&ZERO, COUNTER_ADDR.as_slice(), &[]).unwrap();
+                last = U256::from_be_slice(&res.result);
+            }
+            last
+        }));
+    }
+    for h in handles {
+        // Each read computes stored(0) + 1 = 1 without persisting.
+        assert_eq!(h.await.unwrap(), U256::from(1));
+    }
+}
+
 const STOP_ADDR: Address = address!("00000000000000000000000000000000000000dd");
 
 #[test]
