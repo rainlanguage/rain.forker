@@ -67,6 +67,10 @@ pub struct Env {
 
 /// A single forked network: its lazily-cached database, the shared backend used
 /// for replay block/tx lookups, and the cfg/block environment to execute against.
+///
+/// Cloning copies the accumulated revm-layer cache and shares the underlying
+/// RPC-backed backend (it's `Arc`-based), giving an independent state view.
+#[derive(Clone)]
 struct Fork {
     /// revm database layered over the RPC-backed shared backend; accumulates
     /// state committed by `*_committing` calls.
@@ -81,6 +85,7 @@ struct Fork {
 
 /// Thin multi-fork EVM wrapper providing read/write calls, tracing, and
 /// historical transaction replay over [`revm`] + [`foundry_fork_db`].
+#[derive(Clone)]
 pub struct Forker {
     forks: HashMap<ForkId, Fork>,
     active: Option<ForkId>,
